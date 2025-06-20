@@ -2,41 +2,34 @@ pipeline {
     agent any
 
     parameters {
-        booleanParam(name: 'DEPLOY_TOMCAT1', defaultValue: true, description: 'Deploy to Tomcat1')
-        booleanParam(name: 'DEPLOY_TOMCAT2', defaultValue: true, description: 'Deploy to Tomcat2')
+        booleanParam(name: 'DEPLOY_TOMCAT1', defaultValue: true, description: 'Deploy to Tomcat1 (13.233.145.8)')
+        booleanParam(name: 'DEPLOY_TOMCAT2', defaultValue: true, description: 'Deploy to Tomcat2 (3.110.104.36)')
     }
 
     environment {
-        JAR_FILE = "/var/lib/jenkins/workspace/jarfiledeploy/upi-acq-vo-1.0.121.UAT.jar"
         JAR_NAME = "upi-acq-vo-1.0.121.UAT.jar"
-        ARTIFACTORY_REPO = "jar-repo"
+        ARTIFACTORY_REPO = "jar-repo" // Artifactory repo name
+        ARTIFACTORY_URL = "http://<artifactory-ip>:8082/artifactory"
         DEPLOY_PATH = "/home/ubuntu/deploy"
         DEPLOY_CONTEXT = "upi-acq-vo"
-        SSH_CREDENTIALS_ID = "7e4031ee-9f2c-4479-b3ee-00a97373fbb1"
+        SSH_CREDENTIALS_ID = "3288f865-b71f-4129-ba52-a7965a29d275"
+        JAR_FILE = "${env.WORKSPACE}/${env.JAR_NAME}"
+        TOMCAT1_IP = "13.233.145.8"
+        TOMCAT2_IP = "3.110.104.36"
+        ARTIFACTORY_USER = "admin"
+        ARTIFACTORY_PASSWORD = "<your-password>" // Prefer using Jenkins Credentials
     }
 
     stages {
-        stage('Upload to JFrog') {
+        stage('Upload to JFrog Artifactory') {
             steps {
-                sh "jfrog rt u ${env.JAR_FILE} ${env.ARTIFACTORY_REPO}/${env.JAR_NAME}"
+                sh """
+                    jfrog rt u ${JAR_FILE} ${ARTIFACTORY_REPO}/${JAR_NAME}
+                """
             }
         }
 
-        stage('Load IPs') {
-            steps {
-                withCredentials([
-                    string(credentialsId: 'tomcat1-ip', variable: 'IP1'),
-                    string(credentialsId: 'tomcat2-ip', variable: 'IP2')
-                ]) {
-                    script {
-                        env.TOMCAT1_IP = "${IP1}"
-                        env.TOMCAT2_IP = "${IP2}"
-                    }
-                }
-            }
-        }
-
-        stage('Download from JFrog to Server') {
+        stage('Download from JFrog & Deploy') {
             steps {
                 script {
                     withCredentials([sshUserPrivateKey(
@@ -44,21 +37,20 @@ pipeline {
                         keyFileVariable: 'SSH_KEY_PATH',
                         usernameVariable: 'SSH_USER'
                     )]) {
+
+                        def downloadCommand = """
+                            curl -u ${ARTIFACTORY_USER}:${ARTIFACTORY_PASSWORD} -O "${ARTIFACTORY_URL}/${ARTIFACTORY_REPO}/${JAR_NAME}"
+                            mv ${JAR_NAME} ${DEPLOY_PATH}/
+                        """
+
                         if (params.DEPLOY_TOMCAT1) {
                             sh """
-                            ssh -o StrictHostKeyChecking=no -i \$SSH_KEY_PATH \$SSH_USER@${env.TOMCAT1_IP} '
-                                curl -u admin:<your-password> -O "http://<artifactory-ip>:8082/artifactory/${env.ARTIFACTORY_REPO}/${env.JAR_NAME}"
-                                mv ${env.JAR_NAME} ${env.DEPLOY_PATH}/
-                            '
+                                ssh -o StrictHostKeyChecking=no -i \$SSH_KEY_PATH \$SSH_USER@${TOMCAT1_IP} '${downloadCommand}'
                             """
                         }
-
                         if (params.DEPLOY_TOMCAT2) {
                             sh """
-                            ssh -o StrictHostKeyChecking=no -i \$SSH_KEY_PATH \$SSH_USER@${env.TOMCAT2_IP} '
-                                curl -u admin:<your-password> -O "http://<artifactory-ip>:8082/artifactory/${env.ARTIFACTORY_REPO}/${env.JAR_NAME}"
-                                mv ${env.JAR_NAME} ${env.DEPLOY_PATH}/
-                            '
+                                ssh -o StrictHostKeyChecking=no -i \$SSH_KEY_PATH \$SSH_USER@${TOMCAT2_IP} '${downloadCommand}'
                             """
                         }
                     }
@@ -74,16 +66,18 @@ pipeline {
                         keyFileVariable: 'SSH_KEY_PATH',
                         usernameVariable: 'SSH_USER'
                     )]) {
+
                         def restartScript = '''
-                            sudo /home/ubuntu/apache-tomcat-9.0.102/bin/shutdown.sh || true
+                            sudo /home/ubuntu/apache-tomcat-9.0.105/bin/shutdown.sh || true
                             sleep 5
-                            sudo /home/ubuntu/apache-tomcat-9.0.102/bin/startup.sh
+                            sudo /home/ubuntu/apache-tomcat-9.0.105/bin/startup.sh
                         '''
+
                         if (params.DEPLOY_TOMCAT1) {
-                            sh "ssh -o StrictHostKeyChecking=no -i \$SSH_KEY_PATH \$SSH_USER@${env.TOMCAT1_IP} '${restartScript}'"
+                            sh "ssh -o StrictHostKeyChecking=no -i \$SSH_KEY_PATH \$SSH_USER@${TOMCAT1_IP} '${restartScript}'"
                         }
                         if (params.DEPLOY_TOMCAT2) {
-                            sh "ssh -o StrictHostKeyChecking=no -i \$SSH_KEY_PATH \$SSH_USER@${env.TOMCAT2_IP} '${restartScript}'"
+                            sh "ssh -o StrictHostKeyChecking=no -i \$SSH_KEY_PATH \$SSH_USER@${TOMCAT2_IP} '${restartScript}'"
                         }
                     }
                 }
@@ -94,10 +88,12 @@ pipeline {
             steps {
                 script {
                     if (params.DEPLOY_TOMCAT1) {
-                        sh "curl -s -o /dev/null -w '%{http_code}' http://${env.TOMCAT1_IP}:8080/${env.DEPLOY_CONTEXT}/ || echo 'Tomcat1 not reachable'"
+                        echo "Checking Tomcat1..."
+                        sh "curl -s -o /dev/null -w '%{http_code}' http://${TOMCAT1_IP}:8080/${DEPLOY_CONTEXT}/ || echo 'Tomcat1 not reachable'"
                     }
                     if (params.DEPLOY_TOMCAT2) {
-                        sh "curl -s -o /dev/null -w '%{http_code}' http://${env.TOMCAT2_IP}:8080/${env.DEPLOY_CONTEXT}/ || echo 'Tomcat2 not reachable'"
+                        echo "Checking Tomcat2..."
+                        sh "curl -s -o /dev/null -w '%{http_code}' http://${TOMCAT2_IP}:8080/${DEPLOY_CONTEXT}/ || echo 'Tomcat2 not reachable'"
                     }
                 }
             }
